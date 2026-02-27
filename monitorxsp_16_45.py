@@ -1,41 +1,25 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import streamlit as st
 from scipy.stats import norm
 from datetime import datetime, time, date
 import requests
 import pytz
 import time as sleep_timer
-import warnings
-import logging
 
-# --- CONFIGURACIÓN ---
-warnings.filterwarnings("ignore")
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+# --- CONFIGURACIÓN E INTERFAZ ---
+st.set_page_config(page_title="THE ORACLE v9.3 PRO", layout="wide")
 ZONA_HORARIA = pytz.timezone('Europe/Madrid')
 FINNHUB_API_KEY = 'd6d2nn1r01qgk7mkblh0d6d2nn1r01qgk7mkblhg'
 
-st.set_page_config(page_title="XSP Oracle v8.4", layout="wide")
-
-def check_noticias_pro(api_key):
-    eventos_prohibidos = ["CPI", "FED", "FOMC", "NFP", "POWELL", "PPI", "INTEREST RATE", "JOBLESS",
-"TARIFF", "TRADE WAR", "RETAIL SALES", "EARNINGS"]
-    hoy = str(date.today())
-    url = f"https://finnhub.io{hoy}&to={hoy}&token={api_key}"
-    estado = {"bloqueo": False, "eventos": []}
-    try:
-        r = requests.get(url, timeout=5).json().get('economicCalendar', [])
-        for ev in r:
-            if ev.get('country') == 'US' and str(ev.get('impact', '')).lower() in ['high', '3', '4']:
-                nombre = ev['event'].upper()
-                if any(k in nombre for k in eventos_prohibidos):
-                    h_utc = datetime.strptime(ev['time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.utc)
-                    h_es = h_utc.astimezone(ZONA_HORARIA).time()
-                    estado["eventos"].append(f"{ev['event']} ({h_es.strftime('%H:%M')})")
-                    if time(14, 00) <= h_es <= time(21, 00): estado["bloqueo"] = True
-        return estado
-    except: return estado
+# --- 1. FUNCIONES DE APOYO (Página 1 y 2 del PDF) ---
+def enviar_telegram(mensaje):
+    token = "8730360984:AAGJCvvnQKbZJFnAIQnfnC4bmrq1lCk9MEo"
+    chat_id = "7121107501"
+    url = f"https://api.telegram.org{token}/sendMessage?chat_id={chat_id}&text={mensaje}"
+    try: requests.get(url, timeout=5)
+    except: pass
 
 def calcular_streak_dias(df_diario):
     closes = df_diario['Close'].tail(10).values
@@ -47,9 +31,10 @@ def calcular_streak_dias(df_diario):
         else: break
     return streak
 
+# --- 2. OBTENCIÓN DE DATOS MAESTROS (Página 2 y 3 del PDF) ---
 def obtener_datos_maestros():
     try:
-        tickers = {"XSP": "^XSP", "SPY": "SPY", "RSP": "RSP", "VIX": "^VIX", "VIX9D": "^VIX9D", "SKEW": "^SKEW", "TNX": "^TNX", "PCCE": "PCCE"}
+        tickers = {"XSP": "^XSP", "VIX": "^VIX", "VIX9D": "^VIX9D", "TNX": "^TNX", "PCCE": "PCCE", "RSP": "RSP"}
         raw_data = {}
         for k, v in tickers.items():
             t = yf.Ticker(v)
@@ -57,101 +42,101 @@ def obtener_datos_maestros():
             if df.empty: df = t.history(period="7d", interval="1d")
             raw_data[k] = df
         
-        df_x = raw_data["XSP"] if not raw_data["XSP"].empty else raw_data["SPY"]
-        factor = 10 if "SPY" in str(df_x) else 1
-        actual = float(df_x['Close'].iloc[-1]) * factor
-        apertura = float(df_x['Open'].iloc[-1]) * factor
-        prev_close = float(df_x['Close'].iloc[-2]) * factor
+        df_x = raw_data["XSP"]
+        actual = float(df_x['Close'].iloc[-1])
+        apertura = float(df_x['Open'].iloc[-1])
+        prev_close = float(df_x['Close'].iloc[-2])
         
-        def calc_rsi(series, p):
-            delta = series.diff()
-            g = (delta.where(delta > 0, 0)).rolling(window=p).mean()
-            l = (-delta.where(delta < 0, 0)).rolling(window=p).mean()
-            return 100 - (100 / (1 + (g / l.replace(0, np.nan)))).iloc[-1]
-
         df_diario = yf.Ticker("^XSP").history(period="30d", interval="1d")
-        if df_diario.empty: df_diario = yf.Ticker("SPY").history(period="30d", interval="1d")
-        atr14 = (df_diario['High'] - df_diario['Low']).tail(14).mean() * factor
-        cierre_diario = df_diario['Close'] * factor
-        std_20 = cierre_diario.tail(20).std()
-        z_score = (actual - cierre_diario.tail(20).mean()) / std_20 if std_20 > 0 else 0
+        atr14 = (df_diario['High'] - df_diario['Low']).tail(14).mean()
         
+        # Z-Score y Streak
+        std_20 = df_diario['Close'].tail(20).std()
+        z_score = (actual - df_diario['Close'].tail(20).mean()) / std_20 if std_20 > 0 else 0
+        streak = calcular_streak_dias(df_diario)
+        
+        # VIX Speed y Caída Flash (Página 3)
+        vix_speed = (float(raw_data["VIX"]['Close'].iloc[-1]) / float(raw_data["VIX"]['Close'].iloc[-5]) - 1) * 100 if len(raw_data["VIX"]) > 5 else 0
+        caida_flash = (actual / (df_x['Close'].iloc[-5]) - 1) * 100 if len(df_x) > 5 else 0
+
+        # Tech Votos (Página 3)
         votos = 0
         for tk in ["AAPL", "MSFT", "NVDA"]:
-            d = yf.Ticker(tk).history(period="1d", interval="1m")
-            if not d.empty and d['Close'].iloc[-1] > d['Open'].iloc[-1]: votos += 1
+            d_tk = yf.Ticker(tk).history(period="1d", interval="1m")
+            if not d_tk.empty and d_tk['Close'].iloc[-1] > d_tk['Open'].iloc[-1]: votos += 1
 
         return {
-            "actual": actual, "apertura": apertura, "prev": prev_close, "ma5": df_x['Close'].tail(5).mean() * factor,
-            "rsi_14": calc_rsi(df_x['Close'], 14), "std_dev": df_x['Close'].std() * factor, "vol_rel": df_x['Volume'].iloc[-1] / df_x['Volume'].tail(30).mean() if df_x['Volume'].tail(30).mean() > 0 else 1,
+            "actual": actual, "apertura": apertura, "prev": prev_close,
             "vix": float(raw_data["VIX"]['Close'].iloc[-1]), "vix9d": float(raw_data["VIX9D"]['Close'].iloc[-1]),
-            "skew": float(raw_data["SKEW"]['Close'].iloc[-1]), "tnx": float(raw_data["TNX"]['Close'].iloc[-1]),
-            "tnx_prev": float(raw_data["TNX"]['Close'].iloc[-2]), "pc_ratio": float(raw_data["PCCE"]['Close'].iloc[-1]) if not raw_data["PCCE"].empty else 0.8,
-            "rsp_bull": float(raw_data["RSP"]['Close'].iloc[-1]) > float(raw_data["RSP"]['Open'].iloc[-1]),
-            "atr14": atr14, "streak": calcular_streak_dias(df_diario), "z_score": z_score, "votos_tech": votos,
-            "inside_day": (df_diario['High'].iloc[-1] < df_diario['High'].iloc[-2] and df_diario['Low'].iloc[-1] > df_diario['Low'].iloc[-2]) if len(df_diario) >= 2 else False,
+            "atr14": atr14, "z_score": z_score, "votos_tech": votos, "streak": streak,
+            "tnx": float(raw_data["TNX"]['Close'].iloc[-1]), "tnx_prev": float(raw_data["TNX"]['Close'].iloc[-2]),
             "gap_pct": (apertura - prev_close) / prev_close * 100,
-            "vix_speed": (float(raw_data["VIX"]['Close'].iloc[-1]) / float(raw_data["VIX"]['Close'].iloc[-5]) - 1) * 100 if len(raw_data["VIX"]) > 5 else 0,
-            "caida_flash": (actual / (df_x['Close'].iloc[-5] * factor) - 1) * 100 if len(df_x) > 5 else 0,
-            "cambio_15m": (actual - df_x['Close'].iloc[-15] * factor) if len(df_x) > 15 else 0
+            "rsp_bull": float(raw_data["RSP"]['Close'].iloc[-1]) > float(raw_data["RSP"]['Open'].iloc[-1]),
+            "vix_speed": vix_speed, "caida_flash": caida_flash,
+            "vol_rel": float(df_x['Volume'].iloc[-1] / df_x['Volume'].tail(30).mean()) if not df_x['Volume'].empty else 1.0
         }
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return None
+    except: return None
 
-# --- UI STREAMLIT ---
-st.title("🏛️ THE ORACLE v8.4 Cloud")
-cap = st.sidebar.number_input("Capital Cuenta (€)", value=25000.0)
+# --- 3. LÓGICA DE TRADING (Página 4 y 5 del PDF) ---
+st.title("🏛️ THE ORACLE v9.3 PRO | Institutional Monitor")
+cap = st.sidebar.number_input("Capital Cuenta (€)", value=25000)
 placeholder = st.empty()
 
 while True:
     d = obtener_datos_maestros()
-    noticias = check_noticias_pro(FINNHUB_API_KEY)
-    ahora = datetime.now(ZONA_HORARIA)
-    
     if d:
         with placeholder.container():
-            # Lógica v8.4
-            mercado_asentado = ahora.time() >= time(16, 45)
+            # Filtros Críticos (Página 3 y 4)
+            vix_panico = d["vix_speed"] > 3.5
+            pico_bonos = d["tnx"] > (d["tnx_prev"] * 1.02)
             vix_peligro = d["vix"] > d["vix9d"]
             divergencia_bonos = (d["tnx"] > d["tnx_prev"]) and (d["actual"] > d["apertura"])
-            bias = (d["actual"] > d["prev"]) and (d["votos_tech"] >= 2) and d["rsp_bull"] and not vix_peligro and not noticias["bloqueo"] and not divergencia_bonos
+            
+            # BIAS ESTADÍSTICO v8.0
+            bias = (d["actual"] > d["prev"] and d["votos_tech"] >= 2 and d["rsp_bull"] 
+                    and not vix_peligro and not divergencia_bonos)
             
             if d["z_score"] > 2.2: bias = False
             if d["z_score"] < -2.2: bias = True
 
-            mult = 0.95 if mercado_asentado else 1.0
-            dist = max(d["atr14"] * mult, d["actual"] * ((d["vix"] / 100) / (252**0.5)) * 1.3)
+            # CÁLCULO STRIKE v9.2 REALISTA (Ajuste que hicimos)
+            m_seg = 0.85 if d["vix"] < 15 else (1.0 if d["vix"] < 22 else 1.3)
+            m_atr = 0.85
+            dist = max(d["atr14"] * m_atr, d["actual"] * ((d["vix"]/100)/15.87) * m_seg)
+            
             vender = round(d["actual"] - dist) if bias else round(d["actual"] + dist)
             if vender % 5 == 0: vender = vender - 1 if bias else vender + 1
             
-            # Lotes y Spread Dinámicos
+            # GESTIÓN DE LOTES (Página 5)
             lotes_base = int((cap / 25000) * 10)
-            lotes = int(lotes_base * 1.5) if d["vix"] < 18 else (max(1, lotes_base // 2) if d["vix"] > 25 else lotes_base)
-            if abs(d["actual"] - vender) > 5 and d["vix"] < 20: lotes = max(lotes, 15)
-            
-            ancho = 2 if d["vix"] < 18 else (5 if d["vix"] > 25 else 3)
-            comprar = vender - ancho if bias else vender + ancho
-
-            # Display de Datos
-            st.markdown(f"### ⏱️ {ahora.strftime('%H:%M:%S')} | **XSP: {d['actual']:.2f}** | **VIX: {d['vix']:.2f}**")
-            
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("ATR14", f"{d['atr14']:.2f}")
-            c2.metric("Z-Score", f"{d['z_score']:.2f}")
-            c3.metric("Bono 10Y", f"{d['tnx']:.2f}")
-            c4.metric("Votos Tech", f"{d['votos_tech']}/3")
-
-            if noticias["bloqueo"]: st.error(f"🚫 BLOQUEO NOTICIAS: {noticias['eventos']}")
-            elif d["vix_speed"] > 3.5: st.error("⚠️ PÁNICO VIX DETECTADO")
-            
-            if not mercado_asentado:
-                st.warning("⏳ MODO PRE-CHECK (Bloqueo hasta 16:45h)")
-                st.info(f"**PRE-ESTRATEGIA:** {'BULL PUT' if bias else 'BEAR CALL'} | **VENDER:** {vender} | **COMPRAR:** {comprar}")
+            if d["vix"] > 35 or pico_bonos or vix_panico: lotes = 0
             else:
-                st.success(f"🚀 ESTRATEGIA ACTIVA: {'BULL PUT' if bias else 'BEAR CALL'}")
-                st.write(f"### VENDER: **{vender}** | COMPRAR: **{comprar}** (Lotes: {lotes}, Spread {ancho})")
-                if abs(d["caida_flash"]) > 0.40: st.error("🚨 ALERTA FLASH: EVALUAR CIERRE")
+                if d["vix"] < 18: lotes = int(lotes_base * 1.5)
+                elif d["vix"] < 25: lotes = lotes_base
+                else: lotes = max(1, lotes_base // 2)
+
+            # --- DISPLAY PROFESIONAL ---
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("XSP Price", f"{d['actual']:.2f}")
+            c2.metric("VIX", f"{d['vix']:.2f}", f"{(d['vix']-d['vix9d']):+.2f}", delta_color="inverse")
+            c3.metric("Z-Score", f"{d['z_score']:.2f}")
+            c4.metric("ATR 14", f"{d['atr14']:.2f}")
+            c5.metric("Streak", f"{d['streak']:+d}d")
+
+            st.divider()
+            
+            # Panel de Estrategia
+            st.subheader(f"🎯 Estrategia: :blue[{'BULL PUT' if bias else 'BEAR CALL'}]")
+            r1, r2, r3 = st.columns(3)
+            r1.info(f"**VENDER:** {vender}")
+            r2.warning(f"**LOTES:** {lotes}")
+            ancho = 2 if d["vix"] < 18 else (3 if d["vix"] < 25 else 5)
+            r3.success(f"**COMPRAR:** {vender - ancho if bias else vender + ancho} (Spread {ancho})")
+
+            # Alertas de Bloqueo
+            if lotes == 0:
+                st.error(f"❌ OPERACIÓN BLOQUEADA: {'VIX Speed' if vix_panico else 'Bono 10Y' if pico_bonos else 'VIX Extremo'}")
+
+            st.caption(f"Actualizado: {datetime.now(ZONA_HORARIA).strftime('%H:%M:%S')}")
 
     sleep_timer.sleep(30)
-    st.rerun()
