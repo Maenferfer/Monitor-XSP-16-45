@@ -7,6 +7,7 @@ from datetime import datetime, time, date
 import requests
 import pytz
 import time as sleep_timer
+import warnings
 import logging
 
 # --- CONFIGURACIÓN ---
